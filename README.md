@@ -4,6 +4,146 @@ A production-ready Node.js + TypeScript backend for an AI live chat agent. Built
 
 ---
 
+## Running Locally
+
+### Prerequisites
+
+- **Node.js 25** — install via [nvm](https://github.com/nvm-sh/nvm):
+  ```bash
+  nvm install 25
+  nvm use 25
+  ```
+- **PostgreSQL** — running locally (the default config expects a local instance)
+- **Redis** (optional) — omit `REDIS_URL` to run without caching
+
+---
+
+### 1. Clone and Install
+
+```bash
+git clone <repository-url>
+cd AI-Chat-Backend
+npm install
+```
+
+---
+
+### 2. Configure Environment
+
+```bash
+cp .env.example .env
+```
+
+Fill in the required values. At minimum you need a `DATABASE_URL` and credentials for your chosen LLM provider:
+
+**OpenAI:**
+```env
+DATABASE_URL=postgresql://<user>@localhost:5432/<database>
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+```
+
+**Azure OpenAI:**
+```env
+DATABASE_URL=postgresql://<user>@localhost:5432/<database>
+LLM_PROVIDER=azure-openai
+AZURE_OPENAI_KEY=your-azure-openai-key-here
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+```
+
+All other values have sensible defaults and can be left as-is for local development.
+
+---
+
+### 3. Set Up the Database
+
+Create the database, generate the Prisma client, and run migrations:
+
+```bash
+# Create the database (if it doesn't exist yet)
+createdb chat_agent
+
+# Generate Prisma client
+npm run db:generate
+
+# Run migrations
+npm run db:migrate
+```
+
+When prompted by `db:migrate`, enter a migration name (e.g. `init`).
+
+To inspect the database visually:
+
+```bash
+npm run db:studio
+```
+
+---
+
+### 4. Start the Dev Server
+
+```bash
+npm run dev
+```
+
+Expected output:
+
+```
+2026-06-08T00:00:00.000Z INFO  [Redis] Connected successfully
+2026-06-08T00:00:00.000Z INFO  [Server] Server running on port 3000
+```
+
+If `REDIS_URL` is not set, you will see a warning instead — the server still starts normally.
+
+---
+
+### 5. Verify the Setup
+
+**Health check:**
+```bash
+curl http://localhost:3000/
+# → 200 OK
+```
+
+**List available models:**
+```bash
+curl http://localhost:3000/api/chat/models
+# → { "status": "success", "data": { "models": ["gpt-4o", "gpt-5"], "default": "gpt-4o" } }
+```
+
+**Send a message (new session):**
+```bash
+curl -X POST http://localhost:3000/api/chat/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello! What can you do?"}'
+# → { "status": "success", "data": { "reply": "...", "sessionId": "<uuid>", "model": "gpt-4o" } }
+```
+
+**Continue an existing session:**
+```bash
+curl -X POST http://localhost:3000/api/chat/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Tell me more.", "sessionId": "<uuid-from-previous-response>"}'
+```
+
+**Fetch conversation history:**
+```bash
+curl http://localhost:3000/api/chat/<sessionId>/messages
+```
+
+---
+
+### Running in Production
+
+```bash
+npm start                    # build + run compiled output
+npm run db:migrate:deploy    # apply pending migrations (no new ones created)
+```
+
+Set `NODE_ENV=production` to enable JSON log output and disable dev formatting.
+
+---
+
 ## Table of Contents
 
 - [Tech Stack](#tech-stack)
@@ -13,7 +153,6 @@ A production-ready Node.js + TypeScript backend for an AI live chat agent. Built
 - [API Endpoints](#api-endpoints)
 - [Environment Variables](#environment-variables)
 - [npm Scripts](#npm-scripts)
-- [Running Locally](#running-locally)
 
 ---
 
@@ -133,8 +272,8 @@ An abstract class that provides ready-made CRUD methods any controller can inher
 An abstract class all route files extend. `addRestRoutes(controller, middlewares)` introspects the controller prototype chain (using `getAllMethods()` which walks the full prototype chain) and automatically wires the standard REST routes:
 
 ```
-GET    /       → controller.index
-GET    /all    → controller.showAll
+POST   /all    → controller.index
+GET    /       → controller.showAll
 GET    /:id    → controller.show
 POST   /       → controller.create
 PUT    /:id    → controller.update
@@ -214,13 +353,13 @@ Wraps the OpenAI SDK and maps SDK-level errors to typed custom errors:
 
 #### AzureOpenAIProvider (`src/llm/providers/azure-openai.provider.ts`)
 
-Wraps the `AzureOpenAI` SDK. Maps logical model names (e.g. `gpt-4o`, `gpt-5`) to Azure deployment names via a `deploymentMap`, which is populated from env vars (`AZURE_OPENAI_GPT4O_DEPLOYMENT`, `AZURE_OPENAI_GPT5_DEPLOYMENT`).
+Wraps the `AzureOpenAI` SDK. Maps logical model names (e.g. `gpt-4o`, `gpt-5`) to Azure deployment names via a `deploymentMap`, populated from `AZURE_OPENAI_GPT4O_DEPLOYMENT` and `AZURE_OPENAI_GPT5_DEPLOYMENT` env vars.
 
 ---
 
 ### 4. ChatService (`src/chat/chat.service.ts`)
 
-The core orchestration logic follows this flow for every message:
+The core orchestration logic for every message:
 
 ```
 1. Create or fetch a Conversation row in PostgreSQL
@@ -242,7 +381,7 @@ Redis is used as a read-through cache for conversation history, significantly re
 ### 5. RedisService (`src/redis/redis.client.ts`)
 
 - Singleton via `static getInstance()`
-- **Graceful degradation**: if `REDIS_URL` is not set, `connect()` is a no-op and all `get/setEx/del` calls return `null`/`undefined` silently — the app works fully without Redis, just without caching
+- **Graceful degradation**: if `REDIS_URL` is not set, `connect()` is a no-op and all `get/setEx/del` calls return `null`/`undefined` silently — the app works fully without Redis
 - Reconnect uses exponential backoff
 - All operations catch and log errors internally — they never throw, so Redis failures are never fatal
 
@@ -252,14 +391,14 @@ Redis is used as a read-through cache for conversation history, significantly re
 
 - Singleton via `static getInstance()`
 - **Development**: colorized pretty output using ANSI codes
-- **Production**: newline-delimited JSON — `info/debug/warn` go to stdout, `error` goes to stderr
+- **Production**: newline-delimited JSON — `info/debug/warn` to stdout, `error` to stderr
 - Domain-specific helpers: `userMessage()`, `aiReply()`, `cacheHit()`, `cacheMiss()`, `cacheWrite()`
 
 ---
 
 ### 7. Environment Validation
 
-`src/config/env.config.ts` uses Zod to parse `process.env` at startup. If any required variable is missing or invalid, the full Zod error is printed and `process.exit(1)` is called. There are no silent configuration failures.
+`src/config/env.config.ts` uses Zod to parse `process.env` at startup. If any required variable is missing or invalid, the full Zod error is printed and `process.exit(1)` is called — no silent configuration failures.
 
 ---
 
@@ -288,7 +427,6 @@ model Message {
 }
 ```
 
-- Conversations and messages are stored in PostgreSQL via Prisma.
 - `Message.conversationId` is indexed for fast history lookups.
 - Deleting a conversation cascades to all its messages.
 
@@ -307,7 +445,7 @@ model Message {
 
 ### GET /
 
-Health check. Returns `200 OK` with no body. Use this for load balancer or uptime monitoring probes.
+Health check. Returns `200 OK`. Use for load balancer or uptime monitoring probes.
 
 ---
 
@@ -330,7 +468,7 @@ Returns the list of models supported by the active LLM provider.
 
 ### POST /api/chat/message
 
-Send a user message and receive an AI reply. If `sessionId` is omitted, a new conversation is created and the ID is returned for use in subsequent requests.
+Send a user message and receive an AI reply. If `sessionId` is omitted, a new conversation is created.
 
 **Request Body:**
 ```json
@@ -343,9 +481,9 @@ Send a user message and receive an AI reply. If `sessionId` is omitted, a new co
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `message` | string | Yes | The user's message (max length controlled by `MAX_MESSAGE_LENGTH`) |
+| `message` | string | Yes | User message (max `MAX_MESSAGE_LENGTH` chars) |
 | `sessionId` | string (UUID) | No | Existing conversation ID. Omit to start a new session |
-| `model` | string | No | Model to use. Falls back to the provider's default if omitted |
+| `model` | string | No | Model to use. Falls back to provider default if omitted |
 
 **Response:**
 ```json
@@ -379,12 +517,10 @@ Fetch the full message history for an existing conversation.
 ```json
 {
   "status": "success",
-  "data": {
-    "messages": [
-      { "sender": "user", "text": "Hello!", "timestamp": "2025-01-01T12:00:00.000Z" },
-      { "sender": "ai", "text": "Hi there! How can I help?", "timestamp": "2025-01-01T12:00:01.000Z" }
-    ]
-  }
+  "data": [
+    { "sender": "user", "text": "Hello!", "timestamp": "2026-06-08T12:00:00.000Z" },
+    { "sender": "ai", "text": "Hi there! How can I help?", "timestamp": "2026-06-08T12:00:01.000Z" }
+  ]
 }
 ```
 
@@ -396,8 +532,8 @@ All variables are validated with Zod at startup. The app will refuse to start if
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string (e.g. `postgresql://user:pass@localhost:5432/aichat`) |
-| `LLM_PROVIDER` | No | `openai` | LLM provider to use: `openai` or `azure-openai` |
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `LLM_PROVIDER` | No | `openai` | `openai` or `azure-openai` |
 | `OPENAI_API_KEY` | If `LLM_PROVIDER=openai` | — | OpenAI API key |
 | `AZURE_OPENAI_KEY` | If `LLM_PROVIDER=azure-openai` | — | Azure OpenAI API key |
 | `AZURE_OPENAI_ENDPOINT` | If `LLM_PROVIDER=azure-openai` | — | Azure OpenAI resource URL |
@@ -405,14 +541,12 @@ All variables are validated with Zod at startup. The app will refuse to start if
 | `AZURE_OPENAI_GPT4O_DEPLOYMENT` | No | `gpt-4o` | Azure deployment name for GPT-4o |
 | `AZURE_OPENAI_GPT5_DEPLOYMENT` | No | `gpt-5` | Azure deployment name for GPT-5 |
 | `LLM_MAX_TOKENS` | No | `1024` | Maximum tokens per LLM response |
-| `LLM_TIMEOUT_MS` | No | `30000` | LLM request timeout in milliseconds |
-| `MAX_MESSAGE_LENGTH` | No | `4000` | Maximum user message length in characters |
-| `CORS_ORIGIN` | No | `*` | Allowed CORS origin (e.g. `https://your-frontend.com`) |
-| `REDIS_URL` | No | — | Redis connection URL. If omitted, caching is disabled and the app runs without Redis |
+| `LLM_TIMEOUT_MS` | No | `30000` | LLM request timeout (ms) |
+| `MAX_MESSAGE_LENGTH` | No | `4000` | Maximum user message length (chars) |
+| `CORS_ORIGIN` | No | `*` | Allowed CORS origin |
+| `REDIS_URL` | No | — | Redis URL. If omitted, caching is disabled and all reads go to PostgreSQL |
 | `PORT` | No | `3000` | HTTP server port |
-| `NODE_ENV` | No | `development` | Runtime environment: `development`, `production`, or `test` |
-
-Create a `.env` file by copying `.env.example` and filling in the required values.
+| `NODE_ENV` | No | `development` | `development`, `production`, or `test` |
 
 ---
 
@@ -420,7 +554,7 @@ Create a `.env` file by copying `.env.example` and filling in the required value
 
 | Script | Description |
 |--------|-------------|
-| `npm run dev` | Start dev server with nodemon + tsx (hot reload on file changes) |
+| `npm run dev` | Start dev server with nodemon + tsx (hot reload) |
 | `npm run build` | Compile TypeScript to `dist/` with correct ESM `.js` extensions |
 | `npm start` | Build then run the compiled output |
 | `npm run db:generate` | Generate the Prisma client from the schema |
@@ -428,141 +562,6 @@ Create a `.env` file by copying `.env.example` and filling in the required value
 | `npm run db:migrate:deploy` | Apply pending migrations without creating new ones (production) |
 | `npm run db:studio` | Open Prisma Studio GUI in the browser |
 | `npm run db:reset` | Drop the database and re-run all migrations from scratch |
-| `npm run lint` | Run ESLint across the codebase |
+| `npm run lint` | Run ESLint |
 | `npm run lint:fix` | Run ESLint with auto-fix |
 | `npm run format` | Format `src/**/*.ts` with Prettier |
-
----
-
-## Running Locally
-
-### Prerequisites
-
-- **Node.js 25** — use [nvm](https://github.com/nvm-sh/nvm) to manage versions:
-  ```bash
-  nvm install 25
-  nvm use 25
-  ```
-- **PostgreSQL** — running locally or accessible via a connection string
-- **Redis** (optional) — if you want caching; the app runs fully without it
-
----
-
-### 1. Clone and Install
-
-```bash
-git clone <repository-url>
-cd AI-Chat-Backend
-npm install
-```
-
----
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and fill in the required values at minimum:
-
-```env
-DATABASE_URL="postgresql://your_user:your_password@localhost:5432/aichat"
-OPENAI_API_KEY="sk-..."
-```
-
-To use Azure OpenAI instead of OpenAI:
-
-```env
-LLM_PROVIDER="azure-openai"
-AZURE_OPENAI_KEY="your-azure-key"
-AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
-```
-
----
-
-### 3. Set Up the Database
-
-Generate the Prisma client and run migrations:
-
-```bash
-npm run db:generate
-npm run db:migrate
-```
-
-When prompted by `db:migrate`, provide a name for the migration (e.g. `init`).
-
-To inspect the database visually:
-
-```bash
-npm run db:studio
-```
-
----
-
-### 4. Start the Dev Server
-
-```bash
-npm run dev
-```
-
-You should see output similar to:
-
-```
-[INFO] Server is running on port 3000
-[INFO] Redis connected
-```
-
----
-
-### 5. Verify the Setup
-
-**Health check:**
-```bash
-curl http://localhost:3000/
-# → 200 OK
-```
-
-**List available models:**
-```bash
-curl http://localhost:3000/api/chat/models
-# → { "status": "success", "data": { "models": [...], "default": "gpt-4o" } }
-```
-
-**Send a message (new session):**
-```bash
-curl -X POST http://localhost:3000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello! What can you do?"}'
-# → { "status": "success", "data": { "reply": "...", "sessionId": "<uuid>", "model": "gpt-4o" } }
-```
-
-**Continue an existing session:**
-```bash
-curl -X POST http://localhost:3000/api/chat/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Tell me more.", "sessionId": "<uuid-from-previous-response>"}'
-```
-
-**Fetch conversation history:**
-```bash
-curl http://localhost:3000/api/chat/<sessionId>/messages
-```
-
----
-
-### Running in Production
-
-Build the TypeScript output and start:
-
-```bash
-npm start
-```
-
-Apply migrations without creating new ones:
-
-```bash
-npm run db:migrate:deploy
-```
-
-Set `NODE_ENV=production` to enable JSON logging and disable dev-only output.
