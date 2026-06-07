@@ -1,0 +1,59 @@
+{
+  "name": "ai-chat-backend",
+  "version": "1.0.0",
+  "description": "AI Live Chat Agent — Backend API",
+  "license": "ISC",
+  "author": "Pankaj Kushwaha",
+  "type": "module",
+  "engines": {
+    "node": ">=25"
+  },
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon --exec './node_modules/.bin/tsx --env-file=.env index.ts' --ext ts,json --ignore dist --ignore node_modules --ignore src/generated",
+    "build": "tsc && ts-add-js-extension add --dir=dist",
+    "start": "npm run build && node -r dotenv/config dist/index.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "db:reset": "prisma migrate reset",
+    "format": "prettier --write 'src/**/*.ts'",
+    "lint": "eslint . --ext .ts,.js",
+    "lint:fix": "eslint . --ext .ts,.js --fix",
+    "prepare": "husky install"
+  },
+  "dependencies": {
+    "openai": "^6.42.0",
+    "@prisma/adapter-pg": "^7.2.0",
+    "@prisma/client": "^7.2.0",
+    "@redis/client": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "morgan": "^1.10.1",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^25.0.3",
+    "@typescript-eslint/eslint-plugin": "^8.50.0",
+    "@typescript-eslint/parser": "^8.50.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-import-resolver-typescript": "^4.4.4",
+    "eslint-plugin-import": "^2.32.0",
+    "globals": "^16.5.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.7.4",
+    "prisma": "^7.2.0",
+    "nodemon": "^3.1.10",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.50.0",
+    "ts-add-js-extension": "^1.6.6"
+  }
+}
