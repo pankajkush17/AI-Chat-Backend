@@ -1,150 +1,568 @@
 # AI Chat Backend
 
-AI-powered customer support chat backend built with Node.js + TypeScript, PostgreSQL, Redis, and the Anthropic Claude API.
+A production-ready Node.js + TypeScript backend for an AI live chat agent. Built with Express 5, Prisma, PostgreSQL, Redis, and the OpenAI SDK — supporting both OpenAI and Azure OpenAI as swappable LLM providers.
 
 ---
 
-## Quick Start
+## Table of Contents
+
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Architecture & Design Patterns](#architecture--design-patterns)
+- [Database Schema](#database-schema)
+- [API Endpoints](#api-endpoints)
+- [Environment Variables](#environment-variables)
+- [npm Scripts](#npm-scripts)
+- [Running Locally](#running-locally)
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node.js 25 |
+| Language | TypeScript (ESM) |
+| Web Framework | Express 5 |
+| ORM | Prisma 7 |
+| Database | PostgreSQL |
+| Cache | Redis (optional, via `@redis/client`) |
+| LLM | OpenAI SDK v6 (OpenAI + Azure OpenAI) |
+| Validation | Zod v4 (env + request validation) |
+| Dev Server | tsx + nodemon |
+| Build | tsc + ts-add-js-extension |
+| Pre-commit | Husky + lint-staged |
+
+---
+
+## Project Structure
+
+```
+.
+├── index.ts                    # Entry point — bootstraps server
+├── prisma/                     # Prisma schema + migrations
+├── src/
+│   ├── app.ts                  # App class — Express setup, middleware, router init
+│   ├── config/
+│   │   ├── env.config.ts       # Zod-validated environment variables (process.exit on invalid)
+│   │   └── config.constants.ts
+│   ├── chat/
+│   │   ├── chat.controller.ts  # ChatController — sendMessage, getMessages, getModels
+│   │   ├── chat.routes.ts      # ChatRoutes extends BaseApiRoutes
+│   │   ├── chat.service.ts     # ChatService — core business logic
+│   │   ├── chat.types.ts       # TypeScript types for the chat layer
+│   │   └── chat.validator.ts   # Zod schemas: sendMessage, getMessages
+│   ├── common/
+│   │   ├── base.controller.ts  # BaseController — abstract CRUD base
+│   │   ├── base.routes.ts      # BaseApiRoutes — abstract route base with addRestRoutes()
+│   │   ├── base.validator.ts   # BaseValidator — Zod middleware + validate + validateBulk
+│   │   ├── base.messages.ts    # Standard response message templates
+│   │   └── base.types.ts       # Shared TypeScript interfaces
+│   ├── errors/
+│   │   ├── customError.ts           # Abstract CustomError base class
+│   │   ├── validationError.ts       # 400
+│   │   ├── notFoundError.ts         # 404
+│   │   ├── rateLimitError.ts        # 429
+│   │   ├── llmError.ts              # 502
+│   │   ├── timeoutError.ts          # 504
+│   │   ├── unprocessableEntityError.ts # 422
+│   │   ├── somethingWentWrongError.ts  # 500
+│   │   └── index.ts                 # Re-exports all errors
+│   ├── llm/
+│   │   ├── llm.interface.ts    # ILLMProvider interface + LLMMessage, LLMChatOptions
+│   │   ├── llm.factory.ts      # createProvider() factory — reads LLM_PROVIDER env
+│   │   ├── prompt.builder.ts   # PromptBuilder — system prompt + message builder
+│   │   └── providers/
+│   │       ├── openai.provider.ts        # OpenAIProvider implements ILLMProvider
+│   │       └── azure-openai.provider.ts  # AzureOpenAIProvider implements ILLMProvider
+│   ├── models/
+│   │   ├── prismaClient.ts     # Singleton Prisma client
+│   │   └── index.ts
+│   ├── redis/
+│   │   ├── redis.client.ts     # RedisService singleton with graceful fallback
+│   │   ├── redis.constants.ts  # Key helpers, TTL constants
+│   │   └── index.ts            # Re-exports redisService, chatHistoryKey, CHAT_HISTORY_TTL_S
+│   ├── routes/
+│   │   ├── index.ts            # Router class — wires all routes to Express app
+│   │   ├── api.routes.ts       # Mounts /api prefix
+│   │   ├── healthCheck.routes.ts # GET / → 200
+│   │   └── notFound.routes.ts  # Catch-all 404
+│   └── utils/
+│       └── logger/
+│           ├── logger.ts       # Logger singleton (colorized dev, JSON prod)
+│           └── index.ts
+```
+
+---
+
+## Architecture & Design Patterns
+
+### 1. App Bootstrap
+
+The server starts in two steps:
+
+1. `index.ts` connects to Redis, calls `appInstance.initialize()`, then starts an `http.createServer`.
+2. The `App` class owns the Express `Application` and a `Router` instance. `App.initializeMiddlewares()` sets up:
+   - CORS (origin from `CORS_ORIGIN` env var)
+   - `express.json` with a 1 MB body limit
+   - Morgan request logging (health check and favicon paths are skipped)
+
+---
+
+### 2. Base Classes
+
+#### BaseController (`src/common/base.controller.ts`)
+
+An abstract class that provides ready-made CRUD methods any controller can inherit:
+
+| Method | Description |
+|--------|-------------|
+| `index` | Paginated list |
+| `showAll` | Unpaginated list |
+| `show` | Single record by ID |
+| `create` | Create a record |
+| `update` | Update a record |
+| `destroy` | Delete a record |
+
+`handleError(error, res)` checks `instanceof CustomError` and uses its `statusCode`, falling back to 422 for unknown errors. Protected hooks that subclasses can override: `getFilters`, `getSearchableFields`, `getInclude`, `getOrderBy`, `transformData`, `afterSave`, `getRelationFilters`.
+
+---
+
+#### BaseApiRoutes (`src/common/base.routes.ts`)
+
+An abstract class all route files extend. `addRestRoutes(controller, middlewares)` introspects the controller prototype chain (using `getAllMethods()` which walks the full prototype chain) and automatically wires the standard REST routes:
+
+```
+GET    /       → controller.index
+GET    /all    → controller.showAll
+GET    /:id    → controller.show
+POST   /       → controller.create
+PUT    /:id    → controller.update
+DELETE /:id    → controller.destroy
+```
+
+Only methods that actually exist on the controller are wired — missing methods are skipped silently.
+
+---
+
+#### BaseValidator (`src/common/base.validator.ts`)
+
+Holds a map of `{ operationName → ZodSchema }` and exposes three utilities:
+
+- **`middleware(operation, source)`** — Express middleware that runs `safeParseAsync` on `req[source]` (body, query, or params) and attaches the result to `req.validatedData`. Responds with a `ValidationError` if parsing fails.
+- **`validate(operation, data)`** — Synchronous validation for use outside of Express middleware.
+- **`validateBulk(items, schema)`** — Validates an array and groups errors by index, useful for batch operations.
+
+---
+
+#### CustomError Hierarchy (`src/errors/`)
+
+```
+CustomError (abstract)
+├── ValidationError          → 400
+├── NotFoundError            → 404
+├── RateLimitError           → 429
+├── UnprocessableEntityError → 422
+├── LLMError                 → 502
+├── TimeoutError             → 504
+└── SomethingWentWrongError  → 500
+```
+
+All errors implement `json()` which returns a consistent shape:
+
+```json
+{
+  "status": "error",
+  "statusCode": 400,
+  "errors": [{ "message": "Descriptive message here" }]
+}
+```
+
+---
+
+### 3. LLM Layer
+
+The LLM layer is built around an interface + factory pattern, making it straightforward to add new providers.
+
+#### ILLMProvider (`src/llm/llm.interface.ts`)
+
+```ts
+interface ILLMProvider {
+  readonly supportedModels: readonly string[];
+  readonly defaultModel: string;
+  chat(
+    userMessage: string,
+    history: LLMMessage[],
+    options: LLMChatOptions
+  ): Promise<string>;
+}
+```
+
+#### Factory (`src/llm/llm.factory.ts`)
+
+`createProvider(providerName)` reads the `LLM_PROVIDER` env var and returns the correct implementation. Adding a new provider requires only a new class implementing `ILLMProvider` and one new `case` in the factory switch.
+
+#### OpenAIProvider (`src/llm/providers/openai.provider.ts`)
+
+Wraps the OpenAI SDK and maps SDK-level errors to typed custom errors:
+
+| SDK Error | Custom Error |
+|-----------|-------------|
+| `OpenAI.RateLimitError` | `RateLimitError` (429) |
+| `OpenAI.APIConnectionTimeoutError` | `TimeoutError` (504) |
+| `OpenAI.AuthenticationError` | `LLMError` (502) |
+
+#### AzureOpenAIProvider (`src/llm/providers/azure-openai.provider.ts`)
+
+Wraps the `AzureOpenAI` SDK. Maps logical model names (e.g. `gpt-4o`, `gpt-5`) to Azure deployment names via a `deploymentMap`, which is populated from env vars (`AZURE_OPENAI_GPT4O_DEPLOYMENT`, `AZURE_OPENAI_GPT5_DEPLOYMENT`).
+
+---
+
+### 4. ChatService (`src/chat/chat.service.ts`)
+
+The core orchestration logic follows this flow for every message:
+
+```
+1. Create or fetch a Conversation row in PostgreSQL
+2. Build cacheKey = chat:history:{conversationId}
+3. Try Redis GET(cacheKey)
+   ├── HIT  → use cached CachedHistoryEntry[]
+   └── MISS → fetch message history from PostgreSQL
+4. Write the user message to PostgreSQL
+5. Call llmProvider.chat(userMessage, history, { model })
+6. Write the AI reply to PostgreSQL
+7. Append both messages to history → write back to Redis (TTL: 3600s)
+8. Return { reply, sessionId, model }
+```
+
+Redis is used as a read-through cache for conversation history, significantly reducing database load on active sessions.
+
+---
+
+### 5. RedisService (`src/redis/redis.client.ts`)
+
+- Singleton via `static getInstance()`
+- **Graceful degradation**: if `REDIS_URL` is not set, `connect()` is a no-op and all `get/setEx/del` calls return `null`/`undefined` silently — the app works fully without Redis, just without caching
+- Reconnect uses exponential backoff
+- All operations catch and log errors internally — they never throw, so Redis failures are never fatal
+
+---
+
+### 6. Logger (`src/utils/logger/logger.ts`)
+
+- Singleton via `static getInstance()`
+- **Development**: colorized pretty output using ANSI codes
+- **Production**: newline-delimited JSON — `info/debug/warn` go to stdout, `error` goes to stderr
+- Domain-specific helpers: `userMessage()`, `aiReply()`, `cacheHit()`, `cacheMiss()`, `cacheWrite()`
+
+---
+
+### 7. Environment Validation
+
+`src/config/env.config.ts` uses Zod to parse `process.env` at startup. If any required variable is missing or invalid, the full Zod error is printed and `process.exit(1)` is called. There are no silent configuration failures.
+
+---
+
+## Database Schema
+
+```prisma
+model Conversation {
+  id        String    @id @default(uuid()) @db.Uuid
+  createdAt DateTime  @default(now()) @map("created_at")
+  metadata  Json?     @default("{}")
+  messages  Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id             String        @id @default(uuid()) @db.Uuid
+  conversationId String        @map("conversation_id") @db.Uuid
+  sender         MessageSender  // enum: user | ai
+  text           String
+  timestamp      DateTime      @default(now())
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@map("messages")
+}
+```
+
+- Conversations and messages are stored in PostgreSQL via Prisma.
+- `Message.conversationId` is indexed for fast history lookups.
+- Deleting a conversation cascades to all its messages.
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Health check — returns 200 |
+| `GET` | `/api/chat/models` | Returns available models and default model |
+| `POST` | `/api/chat/message` | Send a message and receive an AI reply |
+| `GET` | `/api/chat/:sessionId/messages` | Fetch full conversation history for a session |
+
+---
+
+### GET /
+
+Health check. Returns `200 OK` with no body. Use this for load balancer or uptime monitoring probes.
+
+---
+
+### GET /api/chat/models
+
+Returns the list of models supported by the active LLM provider.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "models": ["gpt-4o", "gpt-5"],
+    "default": "gpt-4o"
+  }
+}
+```
+
+---
+
+### POST /api/chat/message
+
+Send a user message and receive an AI reply. If `sessionId` is omitted, a new conversation is created and the ID is returned for use in subsequent requests.
+
+**Request Body:**
+```json
+{
+  "message": "Hello, how are you?",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+  "model": "gpt-4o"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `message` | string | Yes | The user's message (max length controlled by `MAX_MESSAGE_LENGTH`) |
+| `sessionId` | string (UUID) | No | Existing conversation ID. Omit to start a new session |
+| `model` | string | No | Model to use. Falls back to the provider's default if omitted |
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "reply": "I'm doing great! How can I help you?",
+    "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+    "model": "gpt-4o"
+  }
+}
+```
+
+**Error Responses:**
+
+| Status | Cause |
+|--------|-------|
+| 400 | Validation error (missing or invalid fields) |
+| 429 | LLM provider rate limit exceeded |
+| 502 | LLM provider authentication or upstream error |
+| 504 | LLM request timed out |
+| 500 | Unexpected server error |
+
+---
+
+### GET /api/chat/:sessionId/messages
+
+Fetch the full message history for an existing conversation.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "messages": [
+      { "sender": "user", "text": "Hello!", "timestamp": "2025-01-01T12:00:00.000Z" },
+      { "sender": "ai", "text": "Hi there! How can I help?", "timestamp": "2025-01-01T12:00:01.000Z" }
+    ]
+  }
+}
+```
+
+---
+
+## Environment Variables
+
+All variables are validated with Zod at startup. The app will refuse to start if required variables are missing.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string (e.g. `postgresql://user:pass@localhost:5432/aichat`) |
+| `LLM_PROVIDER` | No | `openai` | LLM provider to use: `openai` or `azure-openai` |
+| `OPENAI_API_KEY` | If `LLM_PROVIDER=openai` | — | OpenAI API key |
+| `AZURE_OPENAI_KEY` | If `LLM_PROVIDER=azure-openai` | — | Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | If `LLM_PROVIDER=azure-openai` | — | Azure OpenAI resource URL |
+| `AZURE_OPENAI_API_VERSION` | No | `2025-01-01-preview` | Azure OpenAI API version |
+| `AZURE_OPENAI_GPT4O_DEPLOYMENT` | No | `gpt-4o` | Azure deployment name for GPT-4o |
+| `AZURE_OPENAI_GPT5_DEPLOYMENT` | No | `gpt-5` | Azure deployment name for GPT-5 |
+| `LLM_MAX_TOKENS` | No | `1024` | Maximum tokens per LLM response |
+| `LLM_TIMEOUT_MS` | No | `30000` | LLM request timeout in milliseconds |
+| `MAX_MESSAGE_LENGTH` | No | `4000` | Maximum user message length in characters |
+| `CORS_ORIGIN` | No | `*` | Allowed CORS origin (e.g. `https://your-frontend.com`) |
+| `REDIS_URL` | No | — | Redis connection URL. If omitted, caching is disabled and the app runs without Redis |
+| `PORT` | No | `3000` | HTTP server port |
+| `NODE_ENV` | No | `development` | Runtime environment: `development`, `production`, or `test` |
+
+Create a `.env` file by copying `.env.example` and filling in the required values.
+
+---
+
+## npm Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start dev server with nodemon + tsx (hot reload on file changes) |
+| `npm run build` | Compile TypeScript to `dist/` with correct ESM `.js` extensions |
+| `npm start` | Build then run the compiled output |
+| `npm run db:generate` | Generate the Prisma client from the schema |
+| `npm run db:migrate` | Create and apply a new migration (development) |
+| `npm run db:migrate:deploy` | Apply pending migrations without creating new ones (production) |
+| `npm run db:studio` | Open Prisma Studio GUI in the browser |
+| `npm run db:reset` | Drop the database and re-run all migrations from scratch |
+| `npm run lint` | Run ESLint across the codebase |
+| `npm run lint:fix` | Run ESLint with auto-fix |
+| `npm run format` | Format `src/**/*.ts` with Prettier |
+
+---
+
+## Running Locally
 
 ### Prerequisites
 
-- Node.js 20+
-- PostgreSQL (running locally or a connection URL)
-- Redis (optional — app degrades gracefully if `REDIS_URL` is unset)
-- An Anthropic API key ([console.anthropic.com](https://console.anthropic.com))
+- **Node.js 25** — use [nvm](https://github.com/nvm-sh/nvm) to manage versions:
+  ```bash
+  nvm install 25
+  nvm use 25
+  ```
+- **PostgreSQL** — running locally or accessible via a connection string
+- **Redis** (optional) — if you want caching; the app runs fully without it
 
-### 1. Install dependencies
+---
+
+### 1. Clone and Install
 
 ```bash
+git clone <repository-url>
+cd AI-Chat-Backend
 npm install
 ```
 
-### 2. Configure environment variables
+---
+
+### 2. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and fill in:
+Open `.env` and fill in the required values at minimum:
 
-```
-PORT=3000
-NODE_ENV=development
-DATABASE_URL=postgresql://user:password@localhost:5432/chat_agent
-ANTHROPIC_API_KEY=sk-ant-...        # required
-ANTHROPIC_MODEL=claude-sonnet-4-6
-ANTHROPIC_MAX_TOKENS=1024
-ANTHROPIC_TIMEOUT_MS=30000
-MAX_MESSAGE_LENGTH=4000
-CORS_ORIGIN=http://localhost:5173
-REDIS_URL=redis://localhost:6379    # optional
+```env
+DATABASE_URL="postgresql://your_user:your_password@localhost:5432/aichat"
+OPENAI_API_KEY="sk-..."
 ```
 
-### 3. Set up the database
+To use Azure OpenAI instead of OpenAI:
 
-Create the database:
+```env
+LLM_PROVIDER="azure-openai"
+AZURE_OPENAI_KEY="your-azure-key"
+AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+```
+
+---
+
+### 3. Set Up the Database
+
+Generate the Prisma client and run migrations:
 
 ```bash
-createdb chat_agent
-```
-
-Run Prisma migrations:
-
-```bash
+npm run db:generate
 npm run db:migrate
 ```
 
-### 4. Start the dev server
+When prompted by `db:migrate`, provide a name for the migration (e.g. `init`).
+
+To inspect the database visually:
+
+```bash
+npm run db:studio
+```
+
+---
+
+### 4. Start the Dev Server
 
 ```bash
 npm run dev
 ```
 
-Server starts on `http://localhost:3000`.
+You should see output similar to:
+
+```
+[INFO] Server is running on port 3000
+[INFO] Redis connected
+```
 
 ---
 
-## API Reference
+### 5. Verify the Setup
 
-### POST /api/chat/message
-
-**Request:**
-```json
-{ "message": "What is your return policy?", "sessionId": "uuid-optional" }
+**Health check:**
+```bash
+curl http://localhost:3000/
+# → 200 OK
 ```
 
-**Response 200:**
-```json
-{ "status": "success", "data": { "reply": "...", "sessionId": "uuid" } }
+**List available models:**
+```bash
+curl http://localhost:3000/api/chat/models
+# → { "status": "success", "data": { "models": [...], "default": "gpt-4o" } }
 ```
 
-Store the returned `sessionId` and pass it on subsequent requests to maintain conversation context.
+**Send a message (new session):**
+```bash
+curl -X POST http://localhost:3000/api/chat/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello! What can you do?"}'
+# → { "status": "success", "data": { "reply": "...", "sessionId": "<uuid>", "model": "gpt-4o" } }
+```
 
-**Error codes:** `422` validation, `404` session not found, `429` rate limited, `502` LLM error, `504` timeout.
+**Continue an existing session:**
+```bash
+curl -X POST http://localhost:3000/api/chat/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Tell me more.", "sessionId": "<uuid-from-previous-response>"}'
+```
 
-### GET /api/chat/:sessionId/messages
-
-Returns the full message history for a session.
+**Fetch conversation history:**
+```bash
+curl http://localhost:3000/api/chat/<sessionId>/messages
+```
 
 ---
 
-## Database Commands
+### Running in Production
+
+Build the TypeScript output and start:
 
 ```bash
-npm run db:migrate          # apply pending migrations (dev)
-npm run db:migrate:deploy   # apply migrations without prompts (production)
-npm run db:studio           # open Prisma Studio GUI
-npm run db:reset            # drop and rerun all migrations (dev only)
+npm start
 ```
 
----
+Apply migrations without creating new ones:
 
-## Architecture Overview
-
-```
-src/
-├── config/env.config.ts      # Zod-validated env vars — fail-fast at startup
-├── chat/                     # Chat feature (routes → controller → service)
-│   ├── chat.routes.ts        # Route definitions (auto-discovered by api.routes.ts)
-│   ├── chat.controller.ts    # Thin request/response layer
-│   ├── chat.service.ts       # Orchestration: DB + Redis + LLM
-│   ├── chat.validator.ts     # Zod schemas via BaseValidator
-│   └── chat.types.ts         # TypeScript interfaces
-├── llm/
-│   ├── anthropic.client.ts   # Anthropic SDK wrapper, maps SDK errors → HTTP errors
-│   └── prompt.builder.ts     # System prompt (store FAQ) + history shaping
-├── redis/
-│   ├── redis.client.ts       # Singleton, skipped gracefully if REDIS_URL unset
-│   └── redis.constants.ts    # TTL (1h), key builder
-└── errors/                   # LLMError (502), RateLimitError (429), TimeoutError (504)
+```bash
+npm run db:migrate:deploy
 ```
 
-**Request flow (POST /api/chat/message):**
-1. Zod validator — rejects empty/overlong messages, validates UUID format
-2. Service resolves or creates a `Conversation` in PostgreSQL
-3. History is fetched from Redis (cache hit) or PostgreSQL (cache miss)
-4. User message persisted to PostgreSQL
-5. Claude called with system prompt + conversation history
-6. AI reply persisted to PostgreSQL; Redis cache updated
-7. `{ reply, sessionId }` returned to client
-
-**LLM design:**
-- Provider: Anthropic Claude (`claude-sonnet-4-6`)
-- Store knowledge (shipping, returns, support hours) embedded in the system prompt
-- Full conversation history passed as alternating `user`/`assistant` turns
-- `maxRetries: 0` — SDK errors are caught explicitly and mapped to typed error classes
-- `ANTHROPIC_MAX_TOKENS` defaults to 1024 (adjustable via env)
-
-**Redis caching:**
-- Key: `chat:history:<sessionId>`, TTL: 1 hour
-- Stores compact `{ sender, text }[]` — sufficient for LLM context, skips full metadata
-- Falls through to PostgreSQL on any Redis error or if `REDIS_URL` unset
-
----
-
-## Trade-offs & If I Had More Time
-
-- **Streaming** — Claude supports streaming; SSE would make replies feel more real-time
-- **History truncation** — currently sends full history; long sessions may hit token limits
-- **Per-session rate limiting** — no `express-rate-limit` yet
-- **Tests** — integration tests with `supertest` against a test DB would be first priority
+Set `NODE_ENV=production` to enable JSON logging and disable dev-only output.
