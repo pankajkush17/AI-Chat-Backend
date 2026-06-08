@@ -21,7 +21,7 @@ class ApiRoutes {
     const files = this.getFilesRecursively(basePath);
 
     for (const file of files) {
-      if (file.endsWith("routes.ts")) {
+        if (file.endsWith("routes.ts") || file.endsWith("routes.js")) {
         try {
           const module = await import(file);
           if (module.default) {
