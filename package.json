@@ -11,8 +11,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon --exec './node_modules/.bin/tsx --env-file=.env index.ts' --ext ts,json --ignore dist --ignore node_modules --ignore src/generated",
-    "build": "tsc && ts-add-js-extension add --dir=dist",
-    "start": "npm run build && node -r dotenv/config dist/index.js",
+    "build": "prisma generate && tsc && ts-add-js-extension add --dir=dist",                                                            
+    "start": "prisma migrate deploy && node dist/index.js", 
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
