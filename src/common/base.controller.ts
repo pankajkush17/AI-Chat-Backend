@@ -4,7 +4,7 @@ import {
   NotFoundError,
   UnprocessableEntityError,
 } from "../errors";
-import { PrismaClient } from "../generated/prisma/client";
+import { PrismaClient } from "@prisma/client";
 import prisma from "../models/prismaClient";
 import responseMessages from "./base.messages";
 import { PrismaModelDelegate, IResponseMessages } from "./base.types";
